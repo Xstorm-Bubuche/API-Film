@@ -1,56 +1,43 @@
 <?php
-
 require_once __DIR__ . '/../services/TMDBService.php';
 
 class MovieController {
-
-    public static function list($type) {
-
-        $movies = TMDBService::getMovies($type);
-
-        if (!$movies) {
+    //recup film en list par type
+    public static function list(string $type): void {
+        try {
+            $movies = TMDBService::getMovies($type);
+            if (isset($movies['error'])) {
+                http_response_code(400);
+            }
+            echo json_encode($movies, JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
             http_response_code(500);
-            echo json_encode(["error" => "Erreur TMDB"]);
-            return;
+            echo json_encode(['error' => $e->getMessage()]);
         }
-
-        echo json_encode($movies);
     }
-
-    public static function addFavorite() {
-
-        $data = json_decode(file_get_contents("php://input"), true);
-
-        if (!isset($data['id']) || !isset($data['title'])) {
+    // recherche
+    public static function search(string $query): void {
+        if (empty(trim($query))) {
             http_response_code(400);
-            echo json_encode(["error" => "Données invalides"]);
+            echo json_encode(['error' => 'pas de recherche vide']);
             return;
         }
-
-        $file = __DIR__ . '/../storage/favorites.json';
-
-        $favorites = [];
-
-        if (file_exists($file)) {
-            $favorites = json_decode(file_get_contents($file), true);
+        try {
+            $movies = TMDBService::searchMovies($query);
+            echo json_encode($movies, JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode(['error' => $e->getMessage()]);
         }
-
-        $favorites[] = $data;
-
-        file_put_contents($file, json_encode($favorites));
-
-        echo json_encode(["message" => "Ajouté aux favoris"]);
     }
-
-    public static function getFavorites() {
-
-        $file = __DIR__ . '/../storage/favorites.json';
-
-        if (!file_exists($file)) {
-            echo json_encode([]);
-            return;
+    // detail
+    public static function detail(int $id): void {
+        try {
+            $movie = TMDBService::getMovieById($id);
+            echo json_encode($movie, JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode(['error' => $e->getMessage()]);
         }
-
-        echo file_get_contents($file);
     }
 }
