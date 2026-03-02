@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CinéAPI – Explorer les films</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+</head>
+
+<body>
+<header>
+  <a class="logo" href="#">Ciné<span>API</span></a>
+
+  <div class="search-wrap">
+    <span class="icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="Rechercher un film…" autocomplete="off">
+  </div>
+
+  <nav id="mainNav">
+    <button data-type="popular" class="active">Populaires</button>
+    <button data-type="top_rated">Top</button>
+    <button data-type="upcoming">Bientôt</button>
+    <button data-type="now_playing">À l'affiche</button>
+    <button data-type="favorites">❤ Favoris</button>
+  </nav>
+</header>
+<main>
+  <div class="section-title">
+    <span id="sectionLabel">Films populaires</span>
+    <span class="count" id="moviesCount" style="display:none"></span>
+  </div>
+
+  <div id="moviesContainer">
+    <div class="loading"><div class="spinner"></div> Chargement…</div>
+  </div>
+</main>
+
+<div class="modal-overlay" id="modalOverlay" style="display:none" onclick="closeModal(event)">
+  <div class="modal" style="position:relative" id="movieModal">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-header" id="modalContent"></div>
+  </div>
+</div>
+
+<!-- JavaScript -->
+
+<script>
+const API_BASE = 'http://localhost:8000';
+const IMG_BASE = 'https://image.tmdb.org/t/p/w500';
+let currentType = 'popular';
+let favorites = JSON.parse(localStorage.getItem('cineapi_favs') || '{}');
+let searchTimeout = null;
+
+// nav
+const labels = {
+  popular:     'Films populaires',
+  top_rated:   'Meilleurs films',
+  upcoming:    'Prochainement',
+  now_playing: 'À l\'affiche',
+  favorites:   '❤ Mes Favoris',
+};
+
+//recup film 
+async function fetchMovies(type) {
+  setSection(type);
+  showLoading();
+  try {
+    const url = type === 'favorites'
+      ? `${API_BASE}/favorites`
+      : `${API_BASE}/movies?type=${type}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+
+    const movies = data.results ?? data.favorites ?? [];
+    renderMovies(movies);
+  } catch (e) {
+    showError('Impossible de contacter l\'API.<br>Vérifie que ton serveur PHP tourne sur <code>localhost:8000</code>.');
+  }
+}
+
+// recherche
+async function fetchSearch(q) {
+  if (!q.trim()) { fetchMovies(currentType); return; }
+  setSection('search', `Résultats pour "${q}"`);
+  showLoading();
+  try {
+    const res = await fetch(`${API_BASE}/movies/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+    renderMovies(data.results ?? []);
+  } catch (e) {
+    showError('Impossible de contacter l\'API.');
+  }
+}
+
+// détail des films
+async function fetchDetail(id) {
+  try {
+    const res = await fetch(`${API_BASE}/movies/${id}`);
+    const movie = await res.json();
+    openModal(movie);
+  } catch (e) {
+    showToast('Erreur lors du chargement du détail', 'error');
+  }
+}
+
+// affichage des films
+function renderMovies(movies) {
+  const container = document.getElementById('moviesContainer');
+  const count = document.getElementById('moviesCount');
+
+  if (!movies.length) {
+    container.innerHTML = `<div class="msg-box"><span class="icon">🎬</span><p>Aucun film trouvé.</p></div>`;
+    count.style.display = 'none';
+    return;
+  }
+
+  count.textContent = `${movies.length} film${movies.length > 1 ? 's' : ''}`;
+  count.style.display = '';
+
+  container.innerHTML = '';
+  movies.forEach((movie, i) => {
+    const card = createCard(movie, i);
+    container.appendChild(card);
+  });
+}
+
+// création de la carte film
+function createCard(movie, index) {
+  const div = document.createElement('div');
+  div.className = 'movie-card';
+  div.style.animationDelay = `${Math.min(index * 30, 400)}ms`;
+
+  const isFav = !!favorites[movie.id];
+  const year = (movie.release_date || movie.added_at || '').slice(0, 4);
+  const rating = movie.vote_average ? movie.vote_average.toFixed(1) : '—';
+
+  div.innerHTML = `
+    ${movie.poster_path
+      ? `<img class="poster" src="${IMG_BASE}${movie.poster_path}" alt="${movie.title}" loading="lazy">`
+      : `<div class="no-poster">🎬</div>`}
+    <button class="fav-btn ${isFav ? 'active' : ''}" data-id="${movie.id}" title="${isFav ? 'Retirer des favoris' : 'Ajouter aux favoris'}">
+      ${isFav ? '❤' : '🤍'}
+    </button>
+    <div class="info">
+      <div class="title" title="${movie.title}">${movie.title}</div>
+      <div class="meta">
+        <span class="year">${year}</span>
+        <span class="rating">⭐ ${rating}</span>
+      </div>
+    </div>`;
+
+  div.querySelector('.fav-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleFavorite(movie, e.currentTarget);
+  });
+
+  div.addEventListener('click', () => fetchDetail(movie.id));
+  return div;
+}
+
+// favoris
+async function toggleFavorite(movie, btn) {
+  const id = movie.id;
+  if (favorites[id]) {
+    // Supprimer
+    try {
+      await fetch(`${API_BASE}/favorites/${id}`, { method: 'DELETE' });
+    } catch {}
+    delete favorites[id];
+    btn.textContent = '🤍';
+    btn.classList.remove('active');
+    showToast(`"${movie.title}" retiré des favoris`, 'info');
+  } else {
+    // Ajouter
+    try {
+      await fetch(`${API_BASE}/favorites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: movie.id,
+          title: movie.title,
+          poster_path: movie.poster_path,
+          vote_average: movie.vote_average,
+        })
+      });
+    } catch {}
+    favorites[id] = true;
+    btn.textContent = '❤';
+    btn.classList.add('active');
+    showToast(`"${movie.title}" ajouté aux favoris ❤`, 'success');
+  }
+  localStorage.setItem('cineapi_favs', JSON.stringify(favorites));
+  if (currentType === 'favorites') fetchMovies('favorites');
+}
+
+// détail de la carte film
+function openModal(movie) {
+  const overlay = document.getElementById('modalOverlay');
+  const content = document.getElementById('modalContent');
+  const year = (movie.release_date || '').slice(0, 4);
+  const runtime = movie.runtime ? `${movie.runtime} min` : '';
+  const genres = (movie.genres || []).map(g => g.name).join(', ');
+
+  content.innerHTML = `
+    ${movie.poster_path
+      ? `<img class="modal-poster" src="${IMG_BASE}${movie.poster_path}" alt="${movie.title}">`
+      : `<div class="modal-poster" style="background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:3rem">🎬</div>`}
+    <div class="modal-body">
+      <div class="modal-title">${movie.title}</div>
+      ${movie.tagline ? `<div class="modal-tagline">"${movie.tagline}"</div>` : ''}
+      <p class="modal-overview">${movie.overview || 'Aucune description disponible.'}</p>
+      <div class="modal-meta">
+        ${year ? `<span class="badge">${year}</span>` : ''}
+        ${runtime ? `<span class="badge">⏱ ${runtime}</span>` : ''}
+        ${movie.vote_average ? `<span class="badge accent">⭐ ${movie.vote_average.toFixed(1)}</span>` : ''}
+        ${genres ? `<span class="badge">${genres}</span>` : ''}
+        ${movie.original_language ? `<span class="badge">${movie.original_language.toUpperCase()}</span>` : ''}
+      </div>
+    </div>`;
+
+  overlay.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+}
+
+// fermeture des detail carte film
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modalOverlay') && !e.target.classList.contains('modal-close')) return;
+  document.getElementById('modalOverlay').style.display = 'none';
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal({ target: document.getElementById('modalOverlay') }); });
+
+function showLoading() {
+  document.getElementById('moviesContainer').innerHTML = `<div class="loading"><div class="spinner"></div> Chargement…</div>`;
+  document.getElementById('moviesCount').style.display = 'none';
+}
+
+function showError(msg) {
+  document.getElementById('moviesContainer').innerHTML = `
+    <div class="msg-box"><span class="icon">⚠️</span>
+    <p>${msg}</p></div>`;
+  document.getElementById('moviesCount').style.display = 'none';
+}
+
+function setSection(type, label) {
+  currentType = type;
+  document.getElementById('sectionLabel').textContent = label || labels[type] || type;
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`nav button[data-type="${type}"]`);
+  if (btn) btn.classList.add('active');
+}
+
+let toastTimer;
+function showToast(msg, type = 'info') {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  clearTimeout(toastTimer);
+  const icons = { success: '✅', error: '❌', info: '💡' };
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span>${icons[type]}</span><span>${msg}</span>`;
+  document.body.appendChild(t);
+  toastTimer = setTimeout(() => t.remove(), 3000);
+}
+
+
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('searchInput').value = '';
+    fetchMovies(btn.dataset.type);
+  });
+});
+
+document.getElementById('searchInput').addEventListener('input', (e) => {
+  clearTimeout(searchTimeout);
+  const q = e.target.value;
+  searchTimeout = setTimeout(() => {
+    if (q.length >= 2) fetchSearch(q);
+    else if (q.length === 0) fetchMovies(currentType);
+  }, 400);
+});
+
+fetchMovies('popular');
+</script>
+
+<!-- CSS -->
+
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #13131a;
+    --surface2: #1c1c28;
+    --accent: #e8c84a;
+    --accent2: #ff6b35;
+    --text: #f0ede8;
+    --muted: #7a7a8a;
+    --border: rgba(255,255,255,0.07);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 999;
+    opacity: 0.4;
+  }
+
+  header {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,10,15,0.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 64px;
+  }
+
+  .logo {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2rem;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .logo span { color: var(--accent2); }
+
+  .search-wrap {
+    flex: 1; max-width: 420px; margin: 0 2rem;
+    position: relative;
+  }
+  .search-wrap input {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.55rem 1rem 0.55rem 2.8rem;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-wrap input::placeholder { color: var(--muted); }
+  .search-wrap input:focus { border-color: var(--accent); }
+  .search-wrap .icon {
+    position: absolute; left: 0.85rem; top: 50%; transform: translateY(-50%);
+    color: var(--muted); font-size: 0.9rem;
+  }
+
+  nav { display: flex; gap: 0.25rem; }
+  nav button {
+    background: none; border: none; cursor: pointer;
+    color: var(--muted); font-family: inherit;
+    font-size: 0.8rem; font-weight: 500;
+    padding: 0.4rem 0.9rem; border-radius: 6px;
+    transition: all 0.2s; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  nav button:hover { color: var(--text); background: var(--surface2); }
+  nav button.active { color: var(--bg); background: var(--accent); }
+
+  main { padding: 2.5rem 2rem; max-width: 1400px; margin: 0 auto; }
+
+  .section-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2.2rem;
+    letter-spacing: 0.04em;
+    margin-bottom: 1.5rem;
+    display: flex; align-items: center; gap: 0.75rem;
+  }
+  .section-title .count {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.85rem;
+    background: var(--surface2);
+    color: var(--muted);
+    padding: 0.2rem 0.6rem;
+    border-radius: 20px;
+    font-weight: 500;
+  }
+
+  .movies-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .movie-card {
+    background: var(--surface);
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.25s, box-shadow 0.25s;
+    position: relative;
+    border: 1px solid var(--border);
+    animation: fadeUp 0.4s ease backwards;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .movie-card:hover {
+    transform: translateY(-6px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(232,200,74,0.2);
+  }
+  .movie-card .poster {
+    width: 100%; aspect-ratio: 2/3;
+    object-fit: cover; display: block;
+    background: var(--surface2);
+  }
+  .movie-card .no-poster {
+    width: 100%; aspect-ratio: 2/3;
+    background: var(--surface2);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 2.5rem;
+  }
+  .movie-card .info {
+    padding: 0.75rem;
+  }
+  .movie-card .title {
+    font-size: 0.85rem; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 0.3rem;
+  }
+  .movie-card .meta {
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .movie-card .year { font-size: 0.75rem; color: var(--muted); }
+  .movie-card .rating {
+    font-size: 0.75rem; font-weight: 600;
+    color: var(--accent);
+    display: flex; align-items: center; gap: 0.2rem;
+  }
+
+  .fav-btn {
+    position: absolute; top: 0.5rem; right: 0.5rem;
+    background: rgba(10,10,15,0.75);
+    backdrop-filter: blur(8px);
+    border: none; cursor: pointer;
+    border-radius: 50%; width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.9rem;
+    transition: transform 0.2s, background 0.2s;
+    z-index: 5;
+  }
+  .fav-btn:hover { transform: scale(1.2); background: rgba(232,200,74,0.3); }
+  .fav-btn.active { color: var(--accent); }
+
+  .loading {
+    display: flex; align-items: center; justify-content: center;
+    gap: 1rem; padding: 4rem; color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .msg-box {
+    text-align: center; padding: 4rem 2rem;
+    color: var(--muted);
+  }
+  .msg-box .icon { font-size: 3rem; margin-bottom: 1rem; display: block; }
+  .msg-box p { font-size: 0.9rem; line-height: 1.6; }
+  .msg-box code {
+    background: var(--surface2); padding: 0.1rem 0.4rem;
+    border-radius: 4px; font-size: 0.85rem; color: var(--accent);
+  }
+
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,0.8);
+    backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 1rem;
+    animation: fadeIn 0.2s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    max-width: 680px; width: 100%;
+    max-height: 90vh; overflow-y: auto;
+    animation: slideUp 0.25s ease;
+  }
+  @keyframes slideUp {
+    from { transform: translateY(24px); opacity: 0; }
+    to   { transform: translateY(0); opacity: 1; }
+  }
+  .modal-header {
+    display: flex;
+    gap: 1.5rem;
+    padding: 1.5rem;
+  }
+  .modal-poster {
+    width: 140px; min-width: 140px;
+    aspect-ratio: 2/3; object-fit: cover;
+    border-radius: 10px;
+    background: var(--surface2);
+  }
+  .modal-body { flex: 1; }
+  .modal-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.8rem; letter-spacing: 0.03em;
+    margin-bottom: 0.3rem;
+  }
+  .modal-tagline { color: var(--accent); font-style: italic; font-size: 0.85rem; margin-bottom: 0.75rem; }
+  .modal-overview { font-size: 0.88rem; line-height: 1.65; color: rgba(240,237,232,0.85); }
+  .modal-meta {
+    display: flex; flex-wrap: wrap; gap: 0.6rem;
+    margin-top: 1rem;
+  }
+  .badge {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.75rem; font-weight: 500;
+  }
+  .badge.accent { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .modal-close {
+    position: absolute; top: 1rem; right: 1rem;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 50%; width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; font-size: 1rem; color: var(--muted);
+    transition: all 0.2s;
+  }
+  .modal-close:hover { color: var(--text); background: var(--surface); }
+
+  .toast {
+    position: fixed; bottom: 2rem; right: 2rem; z-index: 300;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.8rem 1.2rem;
+    font-size: 0.88rem;
+    display: flex; align-items: center; gap: 0.6rem;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    animation: toastIn 0.3s ease;
+    max-width: 300px;
+  }
+  @keyframes toastIn {
+    from { transform: translateY(10px); opacity: 0; }
+    to   { transform: translateY(0); opacity: 1; }
+  }
+  .toast.success { border-color: #4caf7a; }
+  .toast.error { border-color: #f44336; }
+  .toast.info { border-color: var(--accent); }
+
+  .api-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .api-panel h3 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.2rem; letter-spacing: 0.04em;
+    margin-bottom: 1rem; color: var(--accent);
+  }
+  .route-list { display: flex; flex-direction: column; gap: 0.4rem; }
+  .route { display: flex; align-items: center; gap: 0.75rem; font-size: 0.82rem; }
+  .method {
+    font-weight: 600; font-size: 0.72rem; letter-spacing: 0.05em;
+    padding: 0.15rem 0.45rem; border-radius: 4px; min-width: 46px; text-align: center;
+  }
+  .method.get { background: rgba(76,175,122,0.15); color: #4caf7a; border: 1px solid rgba(76,175,122,0.3); }
+  .method.post { background: rgba(232,200,74,0.15); color: var(--accent); border: 1px solid rgba(232,200,74,0.3); }
+  .method.delete { background: rgba(244,67,54,0.15); color: #f44336; border: 1px solid rgba(244,67,54,0.3); }
+  .route code { color: var(--muted); font-size: 0.82rem; }
+  .route span { color: rgba(240,237,232,0.5); }
+
+  .setup-notice {
+    background: linear-gradient(135deg, rgba(232,200,74,0.08), rgba(255,107,53,0.05));
+    border: 1px solid rgba(232,200,74,0.3);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2rem;
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+  .setup-notice strong { color: var(--accent); }
+
+  @media (max-width: 700px) {
+    header { padding: 0 1rem; flex-wrap: wrap; height: auto; gap: 0.5rem; padding: 0.75rem 1rem; }
+    .search-wrap { max-width: 100%; margin: 0; order: 3; flex: 1 1 100%; }
+    nav { order: 2; }
+    main { padding: 1.5rem 1rem; }
+    .modal-header { flex-direction: column; }
+    .modal-poster { width: 100px; }
+  }
+</style>
